@@ -1,0 +1,63 @@
+/** Proyecto TPuy
+ *
+ *  bot_setcommand.xbs  Script para asignar un comando al bot.
+ *
+ *  Author: Riztan Gutierrez
+ */
+
+#include "tpy_xbs.ch"
+
+PROCEDURE bot_SetCommand( oForm, oFrom, oEntrada, oMsg, oBot )
+
+   local aTokens, oErr 
+   local cProgram
+   local cScriptFile, cScriptResp, cScript
+   local aLines
+
+   TEXT INTO cScript
+FUNCTION Test( oForm, oFrom, oEntrada, oMsg, oBot )
+   local cRespuesta := ""
+   #content#
+RETURN cRespuesta
+   ENDTEXT
+
+   aTokens := oEntrada:tokens
+   aLines  := hb_aTokens( oEntrada:text, "script:" )
+
+   if LEN(aTokens) >= 3 .and. ( LEN(aLines) = 2 .and. !Empty(aLines[2]) ) ;
+      .and. (aTokens[1] == "/setcommand" .or. aTokens[1] == "/set_command") ;
+      .and. LEFT(aTokens[2],1)="/"
+
+      cScriptFile := oTPuy:cXBScripts+;//oTPuy:cTempDir+;
+                     oBot:Id()+"_"+;
+                     STRTRAN(aTokens[2],"/","")+".xbs"
+
+      cScript := STRTRAN( cScript, "#content#", aLines[2] )
+
+//QOUT("Grabando el script", cScriptFile)
+//QOUT( cScriptFile )
+//QOUT( cScript )
+
+      if FILE( cScriptFile )
+         cScriptResp := STRTRAN(cScriptFile, ".xbs", DTOC(Date())+"_"+Time()+".xbs" )
+         hb_MemoWrit( cScriptResp, hb_MemoRead( cScriptFile ) )
+      endif
+
+      if hb_MemoWrit( cScriptFile, cScript )
+
+         if ::oBot:SetCommand( aTokens[2], ;
+                               {|...| bot_Run( cScriptFile, oForm, ... ) }, .t., cScriptFile ) 
+            oBot:SendMessage( oMsg:chat:id, "Su programación ha sido incorporada.", oMsg )
+         endif
+      else
+         oBot:SendMessage( oMsg:chat:id, "No ha sido posible almacenar el script.", oMsg )
+      endif
+
+   else
+      oBot:SendMessage( oMsg:chat:id, "No se puede procesar esta información.", oMsg )
+   endif
+
+RETURN ""
+
+
+//eof

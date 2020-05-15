@@ -1,0 +1,151 @@
+/*
+ *  Proyecto Tpuy.
+ *
+ *  Programa Inicial.   
+ */
+
+#xtranslate tracelog <xValues, ...> => QOUT( "TPuy."+ALLTRIM(procname())+;
+                                             "("+ALLTRIM(STR(procline()))+") ",;
+                                             <xValues> )
+#xtranslate NToStr( <nValue> ) => ALLTRIM(STR(<nValue>))
+
+
+#include "xbscripts/tlgrmbot.xbs"
+#include "tpy_xbs.ch"
+
+#xtranslate log <cValues, ...> => __Visor( <cValues> )
+
+
+
+Procedure begin()
+
+   local oForm, cError := ""
+
+   hb_CdpSelect( "UTF8" ) 
+
+   SET PUBLIC oForm
+
+   ::lOk   := .t.  // -- Control de actualización, evita que se cree una conexión sobre otra.
+   ::lExit := .f.  // -- Indica que se debe abortar lo que en el timer se esté ejecutando.
+
+   //-- Gestor de Bots en Telegram
+   ::oBot := TlgrmBot():New( "AQUI_TOKEN_DEL_BOT",;
+                             "@NOMBRE_DEL_BOT" )
+
+   //-- Inluimos la lista de comandos.
+   #include "xbscripts/bot_commands.xbs"
+
+   DEFINE TIMER ::oBotUpdate;
+          INTERVAL 5000;
+          ACTION lValor := __BotUpdate( oForm );
+
+   ACTIVATE TIMER ::oBotUpdate
+
+
+
+   DEFINE WINDOW ::oWnd TITLE "TPuy Telegram Bot" ;
+          SIZE 400,400
+
+      DEFINE BOX ::oBox OF ::oWnd
+
+      ::cText := ""
+      DEFINE TEXTVIEW oTPuy:oVisor VAR ::cText OF ::oBox CONTAINER
+
+             oTPuy:oVisor:SetEditable( .f. ) // No Editable
+             oTPuy:oVisor:SetCanFocus( .f. ) // No enfocar
+
+      oTPuy:aStart := ARRAY(14)
+      oTPuy:oVisor:oBuffer:GetIterAtOffSet( oTPuy:aStart, -1 )
+
+      oTPuy:oVisor:CreateTag( "title_center", { "weight", 700,;
+                                                "size", 11*PANGO_SCALE,;
+                                                "justification", GTK_JUSTIFY_CENTER }, oTPuy:aStart )
+
+      oTPuy:oVisor:CreateTag( "bold", { "weight", 700,;
+                                        "size", 10*PANGO_SCALE }, oTPuy:aStart )
+
+      oTPuy:oVisor:Insert_Tag( ::oBot:Name()+hb_eol()+"Visor de eventos." , "title_center", oTPuy:aStart )
+
+   ACTIVATE WINDOW ::oWnd //INITIATE
+
+
+   ::lExit := .t.  //-- Para que la ejecución del timer sepa que se debe abortar.
+
+   ::oBotUpdate:End()
+   ::oBot:End()
+   ::oForm := NIL
+
+RETURN
+
+
+/** 
+ * Comando /start
+ */
+STATIC FUNCTION bot_Start( oFrom, oEntrada, oMsg, oBot )
+   local cResp := ""
+   local oUpdate
+
+   cResp := "Hola "+oFrom:first_name+". Soy "+oBot:Name()+", espero nos podamos llevar muy bien!!"
+
+RETURN cResp
+
+
+
+/**
+ * Ejecuta revision de entradas del bot y procesa las acciones.
+ */
+STATIC PROCEDURE __BotUpdate( oForm )
+   local oEntradas, oEntrada
+
+   if !::lOk 
+      oTPuy:oVisor:Insert( hb_eol()+"Debo esperar..." )
+      return
+   endif
+
+   ::lOk := .f.
+
+   //SysRefresh(.t.)
+   //-- Obtenemos lista de mensajes pendientes por procesar.
+   oEntradas := ::oBot:getUpdates()
+
+   While !oEntradas:Eof() .and. !::lExit
+      oEntrada := oEntradas:Current()
+
+      if hb_isNIL( oEntrada ) ; 
+         //-- Posiblemente problemas de comunicación, esperamos un poco y reiniciamos el ciclo.
+         hb_Idlesleep(3)
+         loop
+      endif
+tracelog "Entrada ", oEntrada:id
+
+
+      log "Nueva Entrada "+oEntrada:id+" Tipo: "
+      oTPuy:oVisor:Insert( oEntradas:type )
+
+      if !Empty( oEntrada:text )
+         log oEntrada:Resume()
+
+         //-- Procesar y responder si es posible.
+         ::oBot:Reply()
+
+      endif
+
+      //oTPuy:oVisor:Insert( hb_eol() )
+
+      if !oEntradas:Skip() //-- Esto para evitar que pueda caer en un ciclo infinito.
+tracelog "No se pudo hacer el salto de entrada!!!!"
+         return
+      endif
+   EndDo
+
+   ::lOk := .t.
+
+RETURN
+
+
+STATIC PROCEDURE __Visor( cValue, cTag )
+   //oTPuy:oVisor:Insert_tag( cValue, "bold", oTPuy:aStart )
+   oTPuy:oVisor:Insert( hb_eol()+cValue )
+RETURN 
+
+//eof

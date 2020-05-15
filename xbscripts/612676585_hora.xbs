@@ -1,0 +1,5 @@
+FUNCTION Test( oForm, oFrom, oEntrada, oMsg, oBot )
+   local cRespuesta := ""
+   
+cRespuesta := "Son las "+Time()
+RETURN cRespuesta

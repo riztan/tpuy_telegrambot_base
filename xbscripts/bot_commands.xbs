@@ -1,0 +1,34 @@
+/*
+ * bot_commands.list  Lista de comandos para el bot de telegram.
+ *
+ * Nota: Cada vez que se invoque un comando de esta forma, 
+ *       la función o script, siempre recibirán 3 parametros en un orden:
+ *       1. oFrom    objeto que contiene los valores del remitente del mensaje recibido.
+ *       2. oEntrada objeto con valores de la entrada o mensaje que se está procesando.
+ *       3. oBot     objeto instancia de la clase TlgrmBot.
+ */
+
+//-- Ejemplo de asignar una función a un comando. 
+//   En este caso, el bloque de código reenvía todos los parametros recibidos (...) 
+ oForm:oBot:SetCommand( "/start", {| ... | bot_Start( ... ) } )
+
+//-- Respondemos al comando /saluda con un simple texto estático.
+ oForm:oBot:SetCommand( "/ayuda", "Hola!! " )
+
+// -- Igualmente se puede entregar a la función solo algunos de los parametros.
+ oForm:oBot:SetCommand( "/saluda", {|from,entrada,msg,bot| "hola "+from:first_name+;
+                                                         ", espero te encuetres bien!"} )
+
+// -- Ejecutamos un script y le entregamos el objeto oForm adicionalmente.
+ oForm:oBot:SetCommand( "/set_command", ;
+                        {|...| oTPuy:RunXBS("bot_setcommand", oForm, ... ) } )
+
+// ----------------------------------------------------------------------------
+
+
+
+//-- Comando registrado desde el bot por: Riztan (330534557) 
+oForm:oBot:SetCommand( "/hora", {|...| bot_Run( "./xbscripts/612676585_hora.xbs", oForm, ... )} )
+
+//-- Comando registrado desde el bot por: Riztan (330534557) 
+oForm:oBot:SetCommand( "/prueba", {|...| bot_Run( "./xbscripts/612676585_prueba.xbs", oForm, ... )} )

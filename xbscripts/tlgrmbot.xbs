@@ -1,0 +1,995 @@
+/*
+ * Proyecto TPuy
+ * tlgrmbot.prg  Clase para manejo de bots de telegram
+ * Author. Riztan Gutiérrez - riztan at gmail dot com
+ * License: GPLv3
+ */
+
+#require "hbcurl"
+#include "hbcurl.ch"
+#include "tpy_class.ch"
+
+
+STATIC FUNCTION bot_ToPublic( hValues, cTlgrmJSON, lTPublic )
+   local uItem, cName, nLen, cType
+   local oValues 
+
+   default lTPublic := .f.
+
+   if lTPublic
+      oValues := TPublic():New()
+   else
+      oValues := TLGRM_Update():New( cTlgrmJSON )
+   endif
+
+   FOR EACH uItem IN hValues
+      cName := hb_hKeyAt( hValues, uItem:__EnumIndex() )
+      // -- intentamos colocar solo "id" para identificacion mas universal.
+      nLen := LEN(cName)
+      IF nLen >= 3 .and. RIGHT(cName,3)="_id"
+         cName := "id"
+      ENDIF
+      // -- fin
+      cType := VALTYPE(uItem)
+      IF cType = "H"
+         oValues:Add( cName, bot_ToPublic( uItem, cTlgrmJSON, .t. ) )
+      ELSEIF cType = "N"
+         oValues:Add( cName, ALLTRIM(STR(uItem)) )
+      ELSE
+         oValues:Add( cName, uItem )
+         //? " - ", cName
+      ENDIF
+   NEXT
+   
+   RETURN oValues
+
+
+
+/** bot_Run Ejecuta un script
+ */  
+FUNCTION bot_Run( cXBSFile, ... )
+   local uRet, oErr := NIL
+
+tracelog cXBSFile
+   TRY
+      uRet := RunXBS( cXBSFile, ... )
+   CATCH oErr
+      uRet := "Se ha presentado un problema al procesar el script. "+hb_eol()
+      uRet += oErr:description + hb_eol()
+      uRet += "<b>Argumentos</b>: "+hb_valtoexp(oErr:args) + hb_eol()
+      uRet += "<b>Operación:</b>: "+hb_valtoexp(oErr:operation) + hb_eol()
+      uRet += REPLICATE("-",20) + hb_eol()
+      uRet += "<b>Contenido del script: </b>"+hb_eol()
+      uRet += "<code>"
+      uRet += hb_MemoRead( cXBSFile )
+      uRet += "</code>"
+      //view( oErr )
+   END
+
+   if hb_isString( uRet ) ; return uRet ; endif
+
+return ""
+
+
+
+
+//---------------------------------------------------------------------------
+
+CLASS tlgrmBot
+
+   protected:
+   DATA pCurl  
+   DATA cBuffer
+
+   DATA cToken          INIT ""
+   DATA cHost           INIT "https://api.telegram.org"
+   DATA cName           INIT ""
+   DATA cURL 
+   DATA cLang           INIT "es"
+
+   DATA nUpdatesLimit   INIT 20
+
+   DATA oUpdates
+   DATA hCommands       INIT hb_Hash()
+
+   DATA hOpenQuestion   INIT hb_Hash()
+
+   DATA lRunning        INIT .f.
+
+   visible:
+   METHOD NEW( cToken, nName, cError )
+   METHOD SetToken( cToken, cError )  
+   METHOD Id()                        INLINE Left( ::cToken, At( ":", ::cToken )-1  ) 
+   METHOD Name()                      INLINE ::cName
+   METHOD SetName( cName )            INLINE ::cName := cName
+   METHOD SetParams( hParams )        INLINE IIF( hb_IsHash(hParams), ::hParams := hParams, nil )
+
+   METHOD ClearQuestion( cFromId )    INLINE iif( hb_hHasKey(::hOpenQuestion,cFromId),;
+                                                  (hb_hDel( ::hOpenQuestion, cFromId ), .t.),;
+                                                   .f. )
+   METHOD OpenQuestion( cFromId )     INLINE iif( hb_hHasKey(::hOpenQuestion,cFromId),; 
+                                                  ::hOpenQuestion[cFromId], "")
+
+   METHOD SetCommand( cCommand, cMsg )
+   METHOD getCommands()               INLINE ::hCommands   
+   METHOD Commands()                  
+   METHOD Reply()
+
+   METHOD getMe()
+   METHOD getUpdates( hParams )
+
+   //-- Metodos relacionados con el manejo del indice de mensajes pendientes (Updates)
+   METHOD GetUpdatesLimit()           INLINE ::nUpdatesLimit
+   METHOD SetUpdatesLimit( nLimit )   INLINE IIF( hb_isNumeric(nLimit) .and. nLimit<50, ;
+                                                  ::nUpdatesLimit := nLimit,            ;
+                                                  nil )
+   
+   METHOD sendMessage( cChat, cText,  oMsg, hOthers )
+   METHOD sendPhoto( cChat, cCaption, cImagePath, oMsg )
+   METHOD answerInLine( cText, oMsg, aParams )
+
+   METHOD SendYesNo( uChatId, cText, oMsg, ... )
+
+   METHOD InlineChoice( hItems )
+//   METHOD KeyboardChoice( hItems )   (POR HACER #ToDo )
+
+   METHOD addQuestion( uChatID, cIdQuestion )  INLINE hb_hSet( ::hOpenQuestion, uChatID, cIdQuestion )
+
+   METHOD sendQuestion( uChatId, cText, oMsg, ... )
+   METHOD sendConfirmation( uChatID, cText, oMsg, ... )
+
+   METHOD Execute( cMethod, hParams, cError )
+
+   METHOD Reconnect()
+
+   METHOD End()
+
+ENDCLASS
+
+
+
+METHOD ReConnect() CLASS TLGRMBOT
+
+   curl_easy_cleanup( ::pCurl )
+   curl_global_cleanup()
+
+
+   curl_global_init()
+   ::pCurl := curl_easy_init()
+
+RETURN
+
+
+
+
+METHOD NEW( cToken, cName, nLimit, cError )  CLASS TLGRMBOT
+
+   if !Empty( cToken )
+      if !::SetToken( cToken, @cError )
+         RETURN cError
+      endif
+   endif
+
+   if !Empty(cName)
+      ::cName := cName
+   endif
+
+   if !Empty(nLimit) ; ::SetUpdatesLimit( nLimit ) ; endif
+
+   curl_global_init()
+
+   ::pCurl := curl_easy_init()
+
+   RETURN Self
+
+
+
+METHOD SetToken( cToken, cError )  CLASS TLGRMBOT
+   if empty(cToken) .or. !ValType( cToken ) = "C"
+      cError := "Token inválido"
+      return .f.
+   endif
+
+   ::cToken := cToken
+   ::cURL := ::cHost + "/bot" + ::cToken + "/"
+
+   RETURN .t.
+
+
+
+METHOD getMe() CLASS TLGRMBOT
+
+   local hTgm, cError
+   local oGetMe := TPublic():New()
+   
+   hTgm := ::Execute( "getMe",,@cError )
+
+   if hb_isNIL( hTgm )
+      ::cError := "Problema al ejecutar la acción."
+      tracelog ::cError
+      return NIL
+   endif
+   
+   oGetMe:id         := hTgm["result"]["id"]
+   oGetMe:first_name := hTgm["result"]["first_name"]
+   oGetMe:username   := hTgm["result"]["username"]
+
+   RETURN oGetMe
+
+
+
+METHOD getUpdates( cError )  CLASS TLGRMBOT
+   local hTgm, uItem
+   local cStoryFile := "tlgrm_history.log", cStory := ""
+   local oUpdates := TLGRM_Updates():New( self )  //TPublic():New()
+   local hResult, cName, aKeys
+   local cType, lFind 
+   local aTypes := { "message",             ;
+                     "edited_message",      ;
+                     "channel_post",        ;
+                     "edited_channel_post", ;
+                     "inline_query",        ;
+                     "chosen_inline_result",;
+                     "callback_query",      ;
+                     "shipping_query",      ;
+                     "pre_checkout_query",  ;
+                     "poll",                ;
+                     "poll_answer"          ;
+                   }
+
+   if FILE( cStoryFile )
+      cStory := hb_MemoRead( cStoryFile )
+   endif
+
+   ::oUpdates := oUpdates
+
+RETURN oUpdates
+
+
+
+METHOD sendMessage( uChatId, cText,  oMsg, hOthers ) CLASS TLGRMBOT
+   local hTgm, hParams//, uItem, hResult
+   //local oRes := TPublic():New()
+
+   hb_default( hOthers, Hash() )
+
+   if VALTYPE(uChatId) = "C" ; uChatId := ALLTRIM(uChatId) ; endif
+   if empty( cText ) ; return "" ; endif
+
+   hParams := Hash()
+   //hParams["&"] := ""
+   
+   if hb_IsObject( oMsg )
+      hParams["reply_to_message_id"] := oMsg:id
+   endif
+
+   hParams["chat_id"] := uChatId
+
+   hParams["text"]    := cText
+
+   hParams["parse_mode"] := "HTML" //"Markdown"
+
+   if !Empty( hOthers )
+      hParams["reply_markup"] := hOthers
+   endif
+
+   hTgm := ::Execute( "sendMessage", hParams )
+
+   if !hb_isHash( hTgm ) ; return .f. ; endif
+
+   RETURN .t.
+
+
+
+METHOD sendPhoto( uChatId, cCaption, cImagePath, oMsg ) CLASS TLGRMBOT
+   local hTgm, hParams//, uItem, hResult
+
+   if VALTYPE(uChatId) = "C" ; uChatId := ALLTRIM(uChatId) ; endif
+   if empty( cCaption ) ; return "" ; endif
+
+   hParams := Hash()
+   
+   if hb_IsObject( oMsg )
+      hParams["reply_to_message_id"] := oMsg:id
+   endif
+
+   hParams["chat_id"] := uChatId
+
+   hParams["caption"] := cCaption
+
+   if LEFT(cImagePath,1)="@"
+      if !FILE( RIGHT(cImagePath,LEN(cImagePath)-1) )
+         tracelog "ALERTA: El Archivo ",cImagePath, " No existe!"
+      endif
+   endif
+   hParams["photo"]   := cImagePath
+   hTgm := ::Execute( "sendPhoto", hParams )
+   
+   if !hb_ISHash( hTgm )
+      RETURN .F.
+   endif
+
+RETURN .t.
+
+
+
+METHOD AnswerInLine( cText, oMsg, aParams, cTitle )  CLASS TLGRMBOT
+   local hTgm //, oRes := TPublic():New()
+   local hParams := hash(), hInline :=Hash()
+
+   hb_default( cTitle, "" )
+
+   if Empty(aParams) ; return oRes ; endif
+
+   hParams["type"] := "article"
+   hParams["id"]   := hb_MD5( hb_jsonEncode( hParams ) + oMsg:id )
+   hParams["title"]:= cTitle //"Titular de la Cédula "+aParams[2]
+   hParams["description"] := cText
+   hParams["input_message_content"] := {"message_text"=>cText}
+
+   hInline["&"] := ""
+   hInline["inline_query_id"] := oMsg:id
+   hInline["results"] := hb_jsonEncode( {hParams} )
+//? "----------------------"
+//? procname()
+//? hb_jsonEncode(hInline)
+
+//? procname(),": Id --> ",hInLine["inline_query_id"]
+   hTgm := ::Execute( "answerInLineQuery", hInline )
+//?
+//? hb_ValToexp( hTgm )
+//?
+   
+   //oRes:nLen := LEN( hTgm["result"] )
+   if !hb_isHash( hTgm ) ; return .F. ; endif
+
+RETURN .t.
+
+
+/*
+METHOD OpenQuestion( cFromId ) CLASS TLGRMBOT
+   if hb_hHasKey( ::hOpenQuestion, cFromId )
+tracelog ::
+      RETURN ::hOpenQuestion[cFromId]
+   endif
+RETURN ""
+*/
+
+METHOD InlineChoice( uChatId, cText, aOptions, oMsg, ... ) CLASS TLGRMBOT
+   local hKBtn, hElement
+
+   if empty( aOptions ) .or. hb_isNIL(aOptions) .or. !hb_isArray(aOptions)
+      tracelog "No se reconoce la lista de elementos a elaborar. "
+      return .f.
+   endif
+
+   hKBtn := {"inline_keyboard" => { aOptions },            ;
+                               "resize_keyboard" => .t.,   ;
+                               "one_time_keyboard" => .t.  ;
+            }
+            
+   tracelog hb_jsonEncode(hKBtn)
+ 
+RETURN ::SendMessage( uChatId, cText, oMsg, hb_jsonEncode(hKBtn), ... )
+
+
+
+METHOD sendQuestion( uChatId, cIdQuestion, cText, oMsg, ... ) CLASS TLGRMBOT
+   hb_hSet( ::hOpenQuestion, uChatID, cIdQuestion )
+RETURN ::SendMessage( uChatId, cText, oMsg, ... )
+
+
+
+METHOD SendYesNo( uChatId, cText, oMsg, ... ) CLASS TLGRMBOT
+   local aOptions 
+   aOptions := {  ;
+                  {"text" => "Si", "callback_data" => "/si"}, ;
+                  {"text" => "No", "callback_data" => "/no"}  ;
+               }
+RETURN ::InlineChoice( uCHatId, cText, aOptions, oMsg, ... )
+
+
+
+METHOD sendConfirmation( uChatID, cText, oMsg, ... )
+   local aOptions 
+
+   if !hb_hHasKey( ::hOpenQuestion, uChatId ) 
+      tracelog "No hay nada para solicitar confirmación."
+      hb_hSet( ::hOpenQuestion, uChatId, "yesno" )
+   endif
+
+   if ::cLang="es"
+      aOptions := {{"text"=>"Si","callback_data"=>"/confirme "+::hOpenQuestion[uChatId]+":SI"},;
+                   {"text"=>"No","callback_data"=>"/confirme "+::hOpenQuestion[uChatId]+":NO"}}
+   else
+      aOptions := {{"text"=>"Yes","callback_data"=>"/confirme "+::hOpenQuestion[uChatId]+":YES"},;
+                   {"text"=>"No" ,"callback_data"=>"/confirme "+::hOpenQuestion[uChatId]+":NO" }}
+   endif
+tracelog hb_valtoexp(aOptions)
+//   ::sendQuestion( uChatID, "yesno", cText, oMsg, ,... )
+RETURN ::InlineChoice( uChatId, cText, aOptions, oMsg, ... )
+
+
+
+METHOD Execute( cMethod, hParams, cError ) CLASS TLGRMBOT
+
+   local hTgm, oMethod, cParams:="", oErr
+   local uResp, nResp := 999 , nCont := 0
+
+   if ::lRunning 
+      tracelog "Ya hay un proceso ejecutándose..."
+      return nil
+   endif
+
+//tracelog "iniciando..."
+
+   ::lRunning := .t.
+
+   While nResp != 0 .and. nCont < 5
+
+      curl_global_init()
+      ::pCurl := curl_easy_init()
+
+
+// -- proxy
+/*
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_PROXYPORT, 3128 )
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_PROXY, 'IP_DEL_PROXY')
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_PROXYTYPE, 'HTTP')
+
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_PROXYUSERPWD, 'USUARIO:PASSWORD')
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_HTTPPROXYTUNNEL, .f.)
+*/
+
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_URL, ::cURL + cMethod )
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_CUSTOMREQUEST, 'POST' )
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_POST, .t. )
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_SSL_VERIFYPEER, .f. )
+
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_CONNECTTIMEOUT, 10 )
+
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_VERBOSE, .t. )
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_HTTPHEADER, {"Content-Type: application/json","charset=utf-8"} )
+
+
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_POSTFIELDS, hb_jsonEncode( hParams ) )
+      curl_easy_setopt( ::pCurl, HB_CURLOPT_DL_BUFF_SETUP )
+
+
+//? ::cURL + cMethod + hb_jsonEncode(hParams)
+//? cParams
+//? "-----------------------"
+//?
+      try
+         nResp := curl_easy_perform( ::pCurl ) 
+      catch oErr
+         tracelog oErr:description
+         hb_idlesleep(3)
+         loop
+      end
+
+      if nResp != HB_CURLE_OK
+         tracelog "ERROR", NToStr(nResp) , iif(nResp=28,"(Limite de espera excedido).","")
+         hb_IdleSleep( 3 )
+      else
+         tracelog time()+" OK "
+         exit
+      endif
+
+      if nCont = 4
+         tracelog "Reincia conteo.. esperando 4 segundos."
+         hb_IdleSleep( 3 )
+         ::Reconnect()
+         hb_IdleSleep( 1 )
+         nCont := 0
+      endif
+      nCont++
+
+tracelog time()+". Contador en ciclo...", nCont
+
+   EndDo
+//tracelog  "continua..."
+   uResp := curl_easy_dl_buff_get( ::pCurl ) 
+
+//tracelog uResp  // <-- mostramos en monitoreo el resultado obtenido.
+
+   hTgm := hb_jsonDecode( curl_easy_dl_buff_get( ::pCurl ) )
+   curl_easy_reset( ::pCurl )
+
+   curl_easy_cleanup( ::pCURL )
+   curl_global_cleanup()
+
+   ::lRunning := .f.
+
+   /*Manipular el posible error que pueda arrojar cURL */
+   if Empty( hTgm )
+      cError :=  "no hay respuesta, contenedor vacio."
+      tracelog cError
+      return NIL
+   endif
+
+   if !hTgm["ok"]
+      cError := STR(hTgm["error_code"])+" -> "+hTgm["description"]
+      tracelog cError
+   endif
+
+RETURN hTgm 
+
+
+
+METHOD SetUpdateNum( cUpdate ) CLASS TlgrmBot
+   if VAL(cUpdate) != 0
+      ::cUpdateNum := cUpdate
+      RETURN .T.
+   endif
+RETURN .F.
+
+
+
+/** Retorna lista de comandos disponibles.
+ */
+METHOD COMMANDS() CLASS TLGRMBOT
+   local cResp
+   cResp := hb_valtoexp( hb_hKeys(::hCommands) )
+   tracelog cResp
+   cResp := STRTRAN(cResp,"/","")
+RETURN cResp
+
+
+
+/** Registra un comando
+ */
+METHOD SetCommand( cCommand, cAction, lUpdateFile, cScriptFile ) CLASS TLGRMBOT
+   local cCommandsFile := oTPuy:cXBScripts+"bot_commands.xbs"
+   local cContent, oFrom
+
+   default lUpdateFile to .f.
+
+   if !hb_isNIL( ::oUpdates )
+      oFrom := ::oUpdates:Current():message:from   
+   endif
+
+tracelog "Incorporando comando ", cCommand //, hb_eol(), "Contenido", cAction 
+   hb_hSet( ::hCommands, cCommand, cAction )
+//tracelog hb_valtoexp(::hCommands)
+
+   if FILE( cCommandsFile ) .and. lUpdateFile .and. !Empty(cScriptFile)
+
+      cContent := hb_MemoRead( cCommandsFile )
+      cContent += hb_eol()
+      cContent += '//-- Comando registrado desde el bot por: '+oFrom:first_name+' ('+oFrom:id+') '
+      cContent += hb_eol()
+      cContent += 'oForm:oBot:SetCommand( "'+cCommand+'", '+;
+                                          '{|...| bot_Run( "'+cScriptFile+'", oForm, ... )} )'
+      cContent += hb_eol()
+
+      if !hb_MemoWrit( cCommandsFile, cContent )
+         tracelog "Hay problemas para almacenar datos de comandos. "
+      endif
+
+   endif
+
+RETURN .t.
+
+
+
+/** Revisa los datos de la entrada e identifica si se solicita la ejecución de 
+ *  un comando para ejecutarlo y emitir la respuesta correspondiente.
+ */
+METHOD Reply() CLASS TLGRMBOT
+   local oUpdate := ::oUpdates:Current()
+   local aTokens := oUpdate:tokens
+   local lCallBack := .f.
+   local oFrom, oMsg, cCommand
+
+   tracelog "tokens", hb_valtoexp( aTokens ) //oUpdate:tokens )
+
+   if Empty( aTokens ) ; return .F. ; endif
+      
+tracelog "type", oUpdate:type
+   Do Case
+   Case oUpdate:type == "callback_query"
+      lCallBack := .t.
+      oFrom := oUpdate:callback_query:from
+      oMsg  := oUpdate:callback_query:message
+   Case oUpdate:type == "message"
+      oFrom := oUpdate:message:from
+      oMsg  := oUpdate:message
+   Other
+      Return .f.
+   EndCase
+
+   cCommand := STRTRAN( aTokens[1], ::cName, "" )
+   if hb_hHasKey( ::hCommands, cCommand )
+      Do Case
+      Case hb_isBlock( ::hCommands[ cCommand ] )      
+         ::SendMessage( oMsg:chat:id, ;
+                        EVAL( ::hCommands[ cCommand ], oFrom, oUpdate, oMsg, self ),;
+                        oMsg )
+
+      Case hb_isString( ::hCommands[ cCommand ] )
+         ::SendMessage( oMsg:chat:id, ::hCommands[ cCommand ], oMsg )
+
+      EndCase
+   else
+tracelog "comando no encontrado."
+      RETURN .F.
+   endif
+
+RETURN .T.
+
+
+
+/** Finaliza la ejecución del bot
+ */
+METHOD End( cError ) CLASS TlgrmBot
+   curl_easy_cleanup( ::pCurl )
+   curl_global_cleanup()
+
+RETURN .t.
+
+
+//-----------------------------------------------------------------------------
+
+
+
+/**
+ *  Clase para control de las entradas en telegram.
+ *  Las entradas son los mensajes sin revisar.
+ */
+CLASS TLGRM_UPDATES //FROM TPUBLIC
+
+   protected:
+   DATA oBot
+   DATA hParams
+   DATA hTgm     INIT hb_Hash()
+   DATA nLen     INIT 0
+   DATA lEof     INIT .f.
+   DATA nPos     INIT 1
+   DATA nUpdate  INIT 1
+   DATA oUpdate
+   DATA cFileUpdates  INIT "tlgrmbot.update"
+
+   DATA cError   INIT ""
+
+   visible:
+   Method New( oBot )
+
+   METHOD Refresh()
+
+   METHOD Len()         INLINE ::nLen
+   METHOD RecCount()    INLINE ::nLen
+   METHOD RecNo()       INLINE ::nPos
+   METHOD Eof()         INLINE ::lEof
+
+   METHOD Current()   
+   METHOD Values()        INLINE hb_hKeys( ::oUpdate:hVars )
+   METHOD Next( nPos )        
+   METHOD Skip( nPos )  INLINE ::Next()
+
+   METHOD Error()       INLINE ::cError
+
+   ERROR HANDLER OnError( uValue )
+
+ENDCLASS
+
+
+
+METHOD New( oBot, nOffset, nLimit ) CLASS TLGRM_UPDATES
+
+   local nUpdate 
+
+   ::oBot := oBot
+
+   if FILE( ::cFileUpdates ) 
+      nUpdate := VAL(hb_MemoRead( ::cFileUpdates ))
+      if nUpdate > 0 ; ::nUpdate := nUpdate ; endif
+   endif
+
+   ::hParams := { "offset" => ::nUpdate,;
+                  "limit"  => ::oBot:getUpdatesLimit() }
+//tracelog hb_valtoexp(::hParams)
+   ::Refresh()
+
+RETURN Self
+
+
+
+METHOD Refresh() CLASS TLGRM_UPDATES
+   
+   local aResult, hTgm
+
+   //SysRefresh(.t.)
+   hTgm := ::oBot:Execute( "getUpdates", ::hParams, @::cError )
+
+   if hb_isNIL( hTgm) .or. !hb_isHash( hTgm ) .or. !hTgm["ok"]
+      tracelog "ERROR. " + ::cError
+      RETURN NIL
+   endif
+
+   ::hTgm := hTgm
+
+   aResult := ::hTgm["result"]
+
+//   tracelog hb_valtoexp( ::hTgm["result"] )
+   if empty( aResult )
+      ::Update := 0
+      ::nLen   := 0
+      ::nPos   := 0
+      ::lEof   := .t.
+      RETURN .t.
+   endif
+
+   ::nUpdate := ::hTgm["result"][::nPos]["update_id"]
+   ::nLen    += LEN( ::hTgm["result"] )
+tracelog ALLTRIM(STR(::nLen)), "Actualizaciones (updates) por procesar.. "
+
+   ::Current()
+
+RETURN .T.
+
+
+
+METHOD Next( nMove ) CLASS TLGRM_UPDATES
+   default nMove := 1
+   ::cError := ""
+   Do Case
+   Case ::nPos + nMove > ::nLen
+      ::lEof := .t.
+      ::nPos := ::nLen
+   Case ::nPos + nMove <= 1
+      ::lEof := .f.
+      ::nPos := 1
+   Case nMove = 0
+      return .t.
+   Other
+      ::nPos += nMove
+   EndCase
+   ::Current( ::nPos )
+
+   //-- Se debe colocar el nro de actualización + 1 
+   //   Como valor de arranque una proxima vez que se inicie el bot.
+   if !hb_MemoWrit( ::cFileUpdates, ALLTRIM(STR(::nUpdate+1)) )
+      ::cError := "No ha sido posible actualizar el fichero de control. ("+::cFileUpdate+")"
+      tracelog ::cError
+      RETURN .F.
+   endif
+
+   hb_IdleSleep( 1 )
+   
+RETURN .T.
+
+
+
+METHOD Current( nPos ) CLASS TLGRM_UPDATES
+   local cTlrmJSON, hUpdate, cUpdate, oUpdate
+   local aTypes := { "message",             ;
+                     "edited_message",      ;
+                     "channel_post",        ;
+                     "edited_channel_post", ;
+                     "inline_query",        ;
+                     "chosen_inline_result",;
+                     "callback_query",      ;
+                     "shipping_query",      ;
+                     "pre_checkout_query",  ;
+                     "poll",                ;
+                     "poll_answer"          ;
+                   }
+
+   ::cError := ""
+
+   default nPos := 0 //::nPos
+
+   if hb_isNIL( ::oUpdate ) ; nPos := 1 ; endif
+
+   if ::nLen = 0
+      cError := "No hay actualización pendiente o no hay comunicación."
+      tracelog cError
+      hb_IdleSleep( 5 )
+tracelog "Reconectando"
+      ::oBot:ReConnect()
+tracelog "Rfrescando"
+      ::Refresh()
+      return NIL
+   endif
+
+tracelog "posicion ", ::nPos
+   if nPos = 0 //.and. !hb_isNIL(::oUpdate)
+//tracelog "retornando ::oUpdate"
+//tracelog "retornando el actual update. nPos",nPos," ::nPos",::nPos
+      return ::oUpdate
+   endif
+
+   if nPos > ::nLen .or. nPos <= 0
+      ::cError := "Posición indicada está fuera del cursor de actualizaciones."
+tracelog "Updates actuales: ", ::Len()
+      tracelog ::cError
+      hb_IdleSleep( 5 )
+      return NIL 
+   endif 
+
+
+   hUpdate := ::hTgm["result"][nPos]
+   cTlgrmJSON := hb_jsonEncode(hUpdate)
+tracelog "keys en hUpdate... ", hb_eol(), hb_valToExp(hb_hKeys( hUpdate ))
+
+   AEVAL( aTypes, {|type| iif( hb_hHasKey(hUpdate,type), hUpdate["type"] := type, nil ) } )
+
+   hUpdate["text"  ] := ""
+   hUpdate["tokens"] := {}
+
+   if hb_hHasKey( hUpdate, "message" )
+
+      if hb_hHasKey( hUpdate["message"], "text" )
+         hUpdate["text"  ] := hUpdate["message"]["text"]
+         hUpdate["tokens"] := hb_aTokens( hUpdate["text"] )
+      endif
+
+      hUpdate["lDice"     ] := .f.
+      hUpdate["lSticker"  ] := .f.
+      hUpdate["lDocument" ] := .f.
+      hUpdate["lVoice"    ] := .f.
+      hUpdate["lAudio"    ] := .f.
+      hUpdate["lVideo"    ] := .f.
+      hUpdate["lVideoNote"] := .f.
+      hUpdate["lAnimation"] := .f.
+      hUpdate["lContact"  ] := .f.
+      hUpdate["lLocation" ] := .f.
+      hUpdate["lVenue"    ] := .f.
+//      hUpdate["lPollOption"]  := .f.
+      Do Case
+      Case hb_hHasKey( hUpdate["message"], "dice" )
+         hUpdate["lDice"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "sticker" )
+         hUpdate["lSticker"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "document" )
+         hUpdate["lDocument"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "voice" )
+         hUpdate["lVoice"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "audio" )
+         hUpdate["lAudio"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "video" )
+         hUpdate["lVideo"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "videonote" )
+         hUpdate["lVideoNote"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "animation" )
+         hUpdate["lAnimation"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "contact" )
+         hUpdate["lContact"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "location" )
+         hUpdate["lLocation"] := .t.
+      Case hb_hHasKey( hUpdate["message"], "venue" )
+         hUpdate["lVenue"] := .t.
+//      Case hb_hHasKey( hUpdate["message"], "polloption" )
+//         hUpdate["lPollOption"] := .t.
+      EndCase
+   endif
+
+   if hb_hHasKey( hUpdate, "callback_query" )
+      hUpdate[ "text"  ] := hUpdate["callback_query"]["data"]
+      hUpdate[ "tokens"] := hb_aTokens( hUpdate["text"] )
+   endif
+
+   oUpdate := bot_ToPublic( hUpdate, cTlgrmJSON )
+   if hb_isNIL( oUpdate ) 
+      hb_IdleSleep( 5 ) 
+      RETURN ::Current()
+   endif
+   ::oUpdate := oUpdate
+   ::nPos    := nPos
+   ::nUpdate := hUpdate["update_id"]
+   if ::nPos > ::nLen ; ::lEof := .t. ; endif
+
+RETURN ::oUpdate
+   
+
+
+METHOD OnError( uValue ) CLASS TLGRM_UPDATES
+
+  Local cMsg
+
+  if hb_IsNIL( ::oUpdate ) ; return nil ; endif
+
+  cMsg := lower( ALLTRIM(__GetMessage()) )
+
+  If ::oUpdate:IsDef( cMsg )
+     Return ::oUpdate:Get( cMsg ) 
+  EndIf
+
+RETURN uValue
+
+
+
+/*
+ * Clase que construye cada elemento (mensaje o entrada) pendiente para procesar.
+ */
+
+CLASS TLGRM_Update FROM TPUBLIC
+
+   protected:
+   DATA oUpdates
+   DATA cTlgrmJSON
+
+   visible:
+   METHOD New( cTlgrmJSON )
+   METHOD Resume()
+   METHOD getJSON()  INLINE ::cTlgrmJSON
+
+   METHOD getFrom()
+
+ENDCLASS
+
+
+
+METHOD New( cTlgrmJSON ) CLASS TLGRM_UPDATE
+
+   ::cTlgrmJSON := cTlgrmJSON
+
+//tracelog ::cTlgrmJSON
+   ::Super:New()
+
+RETURN Self
+
+
+
+METHOD getFrom() CLASS TLGRM_UPDATE
+
+   Do Case
+   Case ::type = "callback_query"
+      return ::callback_query:message:from
+   Case ::type = "message"
+      return ::message:from
+   Other
+      tracelog "TIPO DE ENTRADA AÚN POR PROCESAR EN LA CLASE."
+   EndCase
+RETURN NIL
+
+
+
+METHOD Resume() CLASS TLGRM_UPDATE
+
+   local cResume := ""
+   local oMsg, oFrom, cLastName, cUserName
+
+   Do Case
+   Case ::type = "callback_query"
+      oMsg := ::callback_query:message
+      oFrom := oMsg:from
+      cLastName := iif( oFrom:IsDef("last_name"),oMsg:from:last_name, "" )
+      cUserName := iif( oFrom:IsDef("username"),"("+oMsg:from:username+")", "" )
+      cResume  += "De: "+hb_eol()
+      cResume  += "   Telegram_Id: "+ ALLTRIM(oMsg:from:id )+hb_eol()     +;
+                  "   Nombre: "     + ALLTRIM(oMsg:from:first_name) + " " +;
+                                      cLastName +;
+                                      iif( !Empty(cUserName),cUserName+hb_eol(),+"")
+//      cResume += "Fecha: "+DTOC( NToT( oMsg:date ) ) + hb_eol()
+      cResume += "Texto: "+::callback_query:data
+
+   Case ::type = "message"
+      oMsg := ::message
+      oFrom := oMsg:from
+      cLastName := iif( oFrom:IsDef("last_name"),oMsg:from:last_name, "" )
+      cUserName := iif( oFrom:IsDef("username"),"("+oMsg:from:username+")", "" )
+      cResume  += "De: "+hb_eol()
+//tracelog NToSTR( oMsg:from:id )
+//tracelog hb_valtoexp(oMsg:from )
+      cResume  += "De: "+hb_eol()
+      cResume  += "   Telegram_Id: "+ ALLTRIM(oMsg:from:id )+hb_eol()     +;
+                  "   Nombre: "     + ALLTRIM(oMsg:from:first_name) + " " +;
+                                      cLastName +;
+                                      iif( !Empty(cUserName),cUserName+hb_eol(),+"")
+//      cResume += "Fecha: "+DTOC( NToT( oMsg:date ) ) + hb_eol()
+      if oMsg:IsDef( "text" )
+         cResume += "Texto: " + oMsg:text
+      endif
+      
+
+   Other
+      tracelog "TIPO DE ENTRADA AÚN POR PROCESAR EN LA CLASE."
+      
+   EndCase
+
+RETURN cResume
+
+
+//eof

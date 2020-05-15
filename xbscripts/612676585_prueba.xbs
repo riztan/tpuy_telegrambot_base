@@ -1,0 +1,9 @@
+FUNCTION Test( oForm, oFrom, oEntrada, oMsg, oBot )
+   local cRespuesta := ""
+   
+cRespuesta := "Su telegram_id es: "+oFrom:id+hb_eol()
+cRespuesta += "Su nombre es: "+UTF_8(oFrom:first_name) + " "
+if oFrom:IsDef("last_name")
+   cRespuesta += oFrom:last_name
+endif
+RETURN cRespuesta
